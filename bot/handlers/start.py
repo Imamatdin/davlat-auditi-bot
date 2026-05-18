@@ -12,14 +12,13 @@ from ..db import Database
 router = Router(name="start")
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, db: Database) -> None:
-    # /start always wipes any in-flight FSM (registration, admin reply mode, etc).
-    await state.clear()
+async def send_main_menu(message: Message, db: Database, user_id: int) -> None:
+    """Send the welcome view to `user_id` via reply on `message`.
 
-    user_id = message.from_user.id
+    Reused by /start, /cancel, and the inline cancel button so users always
+    land back on the same main menu after bailing out of a flow.
+    """
     student = await db.get_student(user_id)
-
     if student is None:
         await message.answer(
             texts.WELCOME,
@@ -30,6 +29,13 @@ async def cmd_start(message: Message, state: FSMContext, db: Database) -> None:
             texts.WELCOME_REGISTERED.format(name=_html_escape(student.full_name)),
             reply_markup=keyboards.start_keyboard(registered=True),
         )
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext, db: Database) -> None:
+    # /start always wipes any in-flight FSM (registration, admin reply mode, etc).
+    await state.clear()
+    await send_main_menu(message, db, message.from_user.id)
 
 
 @router.message(Command("info"))

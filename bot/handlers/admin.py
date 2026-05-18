@@ -27,10 +27,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
-from .. import texts
+from .. import keyboards, texts
 from ..config import ADMIN_IDS, BROADCAST_DELAY_SECONDS
 from ..db import Database, students_to_csv_rows
 from ..utils import build_students_csv
+
+# Max characters of the broadcast body we render inside the preview message.
+# Telegram's per-message limit is 4096; the surrounding template eats ~80,
+# so we cap the inlined preview itself well below that.
+_PREVIEW_MAX = 3500
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -38,6 +43,10 @@ router = Router(name="admin")
 
 class AdminReply(StatesGroup):
     waiting = State()
+
+
+class Broadcast(StatesGroup):
+    confirm = State()
 
 
 def _is_admin(message_or_cq) -> bool:
@@ -71,26 +80,78 @@ async def cmd_admin(message: Message, db: Database) -> None:
 async def cmd_broadcast(
     message: Message,
     command: CommandObject,
+    state: FSMContext,
     db: Database,
-    bot: Bot,
 ) -> None:
     text = (command.args or "").strip()
     if not text:
         await message.answer(texts.ADMIN_BROADCAST_USAGE)
         return
 
-    student_ids = await db.all_student_ids()
-    if not student_ids:
+    total = len(await db.all_student_ids())
+    if total == 0:
         await message.answer(texts.ADMIN_BROADCAST_EMPTY)
         return
 
-    await message.answer(texts.ADMIN_BROADCAST_STARTED.format(total=len(student_ids)))
+    await state.set_state(Broadcast.confirm)
+    await state.update_data(broadcast_text=text)
+
+    preview_body = text if len(text) <= _PREVIEW_MAX else text[:_PREVIEW_MAX] + "..."
+    await message.answer(
+        texts.ADMIN_BROADCAST_PREVIEW.format(
+            total=total,
+            preview=_html(preview_body),
+        ),
+        reply_markup=keyboards.broadcast_confirm_keyboard(),
+    )
+
+
+@router.callback_query(Broadcast.confirm, F.data == "admin:bcast:no", _is_admin)
+async def cb_broadcast_no(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    with suppress(TelegramBadRequest):
+        await cq.message.edit_reply_markup(reply_markup=None)
+    await cq.message.answer(texts.ADMIN_BROADCAST_CANCELLED)
+    with suppress(TelegramBadRequest):
+        await cq.answer()
+
+
+@router.callback_query(Broadcast.confirm, F.data == "admin:bcast:yes", _is_admin)
+async def cb_broadcast_yes(
+    cq: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    bot: Bot,
+) -> None:
+    data = await state.get_data()
+    text: Optional[str] = data.get("broadcast_text")
+    await state.clear()
+    with suppress(TelegramBadRequest):
+        await cq.message.edit_reply_markup(reply_markup=None)
+    with suppress(TelegramBadRequest):
+        await cq.answer()
+
+    if not text:
+        await cq.message.answer(texts.ADMIN_BROADCAST_STALE)
+        return
+
+    student_ids = await db.all_student_ids()
+    if not student_ids:
+        await cq.message.answer(texts.ADMIN_BROADCAST_EMPTY)
+        return
+
+    await cq.message.answer(
+        texts.ADMIN_BROADCAST_STARTED.format(total=len(student_ids))
+    )
 
     ok = 0
     fail = 0
     for sid in student_ids:
         try:
-            await bot.send_message(sid, text)
+            # parse_mode=None: send the admin's text as plain text so any
+            # unbalanced <tags> they typed don't fail per-recipient under
+            # the bot's default HTML parse mode.
+            await bot.send_message(sid, text, parse_mode=None)
             ok += 1
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             log.info("Broadcast to %s failed: %s", sid, exc)
@@ -100,7 +161,13 @@ async def cmd_broadcast(
             fail += 1
         await asyncio.sleep(BROADCAST_DELAY_SECONDS)
 
-    await message.answer(texts.ADMIN_BROADCAST_DONE.format(ok=ok, fail=fail))
+    await cq.message.answer(texts.ADMIN_BROADCAST_DONE.format(ok=ok, fail=fail))
+
+
+@router.message(Command("cancel"), Broadcast.confirm, _is_admin)
+async def cmd_cancel_broadcast(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(texts.ADMIN_BROADCAST_CANCELLED)
 
 
 # ---------------------------------------------------------------------------

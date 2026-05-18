@@ -9,6 +9,7 @@ import logging
 from contextlib import suppress
 from typing import Optional
 
+import aiosqlite
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, StateFilter
@@ -19,6 +20,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import keyboards, texts
 from ..config import ADMIN_IDS
 from ..db import Database
+from .start import send_main_menu
 from ..utils import (
     clean_name,
     clean_region,
@@ -53,23 +55,25 @@ async def cb_start_registration(cq: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "reg:cancel")
-async def cb_cancel(cq: CallbackQuery, state: FSMContext) -> None:
+async def cb_cancel(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
     await state.clear()
     await cq.message.answer(
         texts.REG_CANCELLED,
         reply_markup=keyboards.remove_reply_keyboard(),
     )
+    await send_main_menu(cq.message, db, cq.from_user.id)
     with suppress(TelegramBadRequest):
         await cq.answer()
 
 
 @router.message(Command("cancel"), StateFilter(Reg))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
+async def cmd_cancel(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     await message.answer(
         texts.REG_CANCELLED,
         reply_markup=keyboards.remove_reply_keyboard(),
     )
+    await send_main_menu(message, db, message.from_user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +82,8 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 @router.message(Reg.name, F.text)
 async def step_name(message: Message, state: FSMContext) -> None:
-    ok, err = validate_name(message.text or "")
-    if not ok:
-        if err == "short":
-            await message.answer(texts.ERR_NAME_SHORT)
-        else:
-            await message.answer(texts.ERR_NAME_INVALID)
+    if not validate_name(message.text or ""):
+        await message.answer(texts.ERR_NAME_INVALID)
         return
 
     await state.update_data(name=clean_name(message.text))
@@ -101,7 +101,7 @@ async def step_name_non_text(message: Message) -> None:
 # ---------------------------------------------------------------------------
 
 @router.message(Reg.phone, F.contact)
-async def step_phone_contact(message: Message, state: FSMContext) -> None:
+async def step_phone_contact(message: Message, state: FSMContext, db: Database) -> None:
     # When a user shares a contact, accept only their own number to prevent
     # someone registering under a friend's contact card.
     contact = message.contact
@@ -112,16 +112,16 @@ async def step_phone_contact(message: Message, state: FSMContext) -> None:
     if phone is None:
         await message.answer(texts.ERR_PHONE_INVALID, reply_markup=keyboards.contact_keyboard())
         return
-    await _advance_from_phone(message, state, phone)
+    await _advance_from_phone(message, state, db, phone)
 
 
 @router.message(Reg.phone, F.text)
-async def step_phone_text(message: Message, state: FSMContext) -> None:
+async def step_phone_text(message: Message, state: FSMContext, db: Database) -> None:
     phone = normalize_phone(message.text or "")
     if phone is None:
         await message.answer(texts.ERR_PHONE_INVALID, reply_markup=keyboards.contact_keyboard())
         return
-    await _advance_from_phone(message, state, phone)
+    await _advance_from_phone(message, state, db, phone)
 
 
 @router.message(Reg.phone)
@@ -129,7 +129,18 @@ async def step_phone_other(message: Message) -> None:
     await message.answer(texts.ASK_PHONE, reply_markup=keyboards.contact_keyboard())
 
 
-async def _advance_from_phone(message: Message, state: FSMContext, phone: str) -> None:
+async def _advance_from_phone(
+    message: Message, state: FSMContext, db: Database, phone: str
+) -> None:
+    # One phone = one Telegram account. Block the form before the user fills
+    # out program + region only to be rejected at confirm time.
+    existing = await db.get_student_by_phone(phone)
+    if existing is not None and existing.user_id != message.from_user.id:
+        await message.answer(
+            texts.ERR_PHONE_TAKEN, reply_markup=keyboards.contact_keyboard()
+        )
+        return
+
     await state.update_data(phone=phone)
     await state.set_state(Reg.program)
     # Telegram requires a separate message to dismiss the reply keyboard,
@@ -210,14 +221,28 @@ async def step_region_non_text(message: Message) -> None:
 async def cb_confirm(cq: CallbackQuery, state: FSMContext, db: Database, bot: Bot) -> None:
     data = await state.get_data()
     user = cq.from_user
-    student = await db.upsert_student(
-        user_id=user.id,
-        username=user.username,
-        full_name=data["name"],
-        phone=data["phone"],
-        program=data["program"],
-        region=data["region"],
-    )
+    try:
+        student = await db.upsert_student(
+            user_id=user.id,
+            username=user.username,
+            full_name=data["name"],
+            phone=data["phone"],
+            program=data["program"],
+            region=data["region"],
+        )
+    except aiosqlite.IntegrityError:
+        # Another user claimed this phone between phone-step and confirm.
+        # Bounce back to the phone step instead of wiping the whole form.
+        await state.set_state(Reg.phone)
+        with suppress(TelegramBadRequest):
+            await cq.message.edit_reply_markup(reply_markup=None)
+        await cq.message.answer(texts.ERR_PHONE_TAKEN)
+        await cq.message.answer(
+            texts.ASK_PHONE, reply_markup=keyboards.contact_keyboard()
+        )
+        with suppress(TelegramBadRequest):
+            await cq.answer()
+        return
     await state.clear()
     with suppress(TelegramBadRequest):
         await cq.message.edit_reply_markup(reply_markup=None)

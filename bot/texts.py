@@ -44,6 +44,8 @@ BTN_CONFIRM = "Tasdiqlash"
 BTN_RESTART = "Qaytadan"
 BTN_CANCEL = "Bekor qilish"
 BTN_REPLY = "Javob yozish"
+BTN_YES = "Ha, yuborilsin"
+BTN_NO = "Yo'q, bekor qilish"
 
 # ---------------------------------------------------------------------------
 # Registration FSM prompts
@@ -51,15 +53,11 @@ BTN_REPLY = "Javob yozish"
 
 ASK_NAME = (
     "Iltimos, <b>ism va familiyangizni</b> to'liq yozing.\n\n"
-    "Masalan: Aliyev Olim Akmalovich"
-)
-ERR_NAME_SHORT = (
-    "Ism juda qisqa ko'rinmoqda. Iltimos, ism va familiyangizni "
-    "to'liq, kamida 3 ta harfdan iborat qilib yozing."
+    "Masalan: Alisher Karimov"
 )
 ERR_NAME_INVALID = (
-    "Iltimos, faqat harf, bo'sh joy va apostrof (') belgilaridan foydalaning. "
-    "Raqam va boshqa belgilarni qo'shmang."
+    "Iltimos, to'liq ism va familiyangizni kiriting "
+    "(masalan: Alisher Karimov)."
 )
 
 ASK_PHONE = (
@@ -68,8 +66,11 @@ ASK_PHONE = (
     "Masalan: +998901234567"
 )
 ERR_PHONE_INVALID = (
-    "Telefon raqam noto'g'ri formatda. Iltimos, quyidagi ko'rinishda yuboring:\n"
-    "+998901234567, 998901234567 yoki 901234567"
+    "Faqat O'zbekiston raqamlari qabul qilinadi (+998...)."
+)
+ERR_PHONE_TAKEN = (
+    "Bu telefon raqam allaqachon ro'yxatdan o'tgan. "
+    "Har bir raqam faqat bitta hisob uchun."
 )
 
 ASK_PROGRAM = (
@@ -105,7 +106,7 @@ REG_SUCCESS = (
 )
 
 REG_RESTARTED = "Yaxshi, ro'yxatdan o'tishni qaytadan boshlaymiz."
-REG_CANCELLED = "Ro'yxatdan o'tish bekor qilindi. Boshlash uchun /start ni bosing."
+REG_CANCELLED = "Bekor qilindi."
 
 # ---------------------------------------------------------------------------
 # /info
@@ -140,6 +141,9 @@ QUESTION_RECEIVED_VOICE = (
 )
 UNSUPPORTED_MESSAGE = (
     "Faqat matn yoki ovozli xabar yuborishingiz mumkin."
+)
+RATE_LIMITED = (
+    "Soatiga 10 ta savol yuborish mumkin. Biroz kuting."
 )
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,11 @@ ADMIN_BROADCAST_USAGE = (
     "Foydalanish: <code>/broadcast xabar matni</code>\n"
     "Xabar barcha ro'yxatdan o'tgan foydalanuvchilarga yuboriladi."
 )
+ADMIN_BROADCAST_PREVIEW = (
+    "Bu xabar <b>{total}</b> ta talabaga yuboriladi. Tasdiqlaysizmi?\n\n"
+    "<i>Ko'rinishi:</i>\n{preview}"
+)
+ADMIN_BROADCAST_CANCELLED = "Yuborish bekor qilindi."
 ADMIN_BROADCAST_STARTED = "Yuborish boshlandi: <b>{total}</b> ta foydalanuvchi."
 ADMIN_BROADCAST_DONE = (
     "Tugadi.\n"
@@ -217,6 +226,9 @@ ADMIN_BROADCAST_DONE = (
     "Muvaffaqiyatsiz: <b>{fail}</b>"
 )
 ADMIN_BROADCAST_EMPTY = "Hozircha ro'yxatdan o'tgan foydalanuvchi yo'q."
+ADMIN_BROADCAST_STALE = (
+    "Bu so'rov eskirgan. Yangi xabar uchun /broadcast ni qaytadan yuboring."
+)
 
 # Export
 ADMIN_EXPORT_EMPTY = "Eksport qilish uchun ma'lumot yo'q."

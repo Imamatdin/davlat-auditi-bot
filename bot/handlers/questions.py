@@ -20,6 +20,10 @@ from ..db import Database, Student
 log = logging.getLogger(__name__)
 router = Router(name="questions")
 
+# Max questions any single student may submit in a rolling 1-hour window.
+# Defends against floods without throttling legitimate Q&A sessions.
+QUESTIONS_PER_HOUR = 10
+
 
 # Filter: skip messages from any admin so admin-side handlers can claim them
 # without this catch-all swallowing /admin, /broadcast, etc.
@@ -54,6 +58,10 @@ async def on_text_question(
         await message.answer(texts.NEED_REGISTRATION)
         return
 
+    if await db.count_recent_questions(student.user_id, hours=1) >= QUESTIONS_PER_HOUR:
+        await message.answer(texts.RATE_LIMITED)
+        return
+
     qid = await db.add_text_question(student.user_id, text)
     await message.answer(texts.QUESTION_RECEIVED_TEXT)
     await _notify_admins_text(bot, db, student, qid, text)
@@ -72,6 +80,10 @@ async def on_voice_question(
     student = await db.get_student(message.from_user.id)
     if student is None:
         await message.answer(texts.NEED_REGISTRATION)
+        return
+
+    if await db.count_recent_questions(student.user_id, hours=1) >= QUESTIONS_PER_HOUR:
+        await message.answer(texts.RATE_LIMITED)
         return
 
     file_id = message.voice.file_id

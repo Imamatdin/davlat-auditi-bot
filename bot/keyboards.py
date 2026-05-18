@@ -9,6 +9,8 @@ Inline button callback_data conventions:
   reg:restart        restart from name
   reg:cancel         cancel FSM
   admin:reply:<qid>  open reply mode for question <qid>
+  admin:bcast:yes    confirm pending broadcast
+  admin:bcast:no     cancel pending broadcast
 """
 from __future__ import annotations
 
@@ -87,5 +89,16 @@ def admin_reply_keyboard(question_id: int) -> InlineKeyboardMarkup:
                 text=texts.BTN_REPLY,
                 callback_data=f"admin:reply:{question_id}",
             )]
+        ]
+    )
+
+
+def broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=texts.BTN_YES, callback_data="admin:bcast:yes"),
+                InlineKeyboardButton(text=texts.BTN_NO, callback_data="admin:bcast:no"),
+            ]
         ]
     )

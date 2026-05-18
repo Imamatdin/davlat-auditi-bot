@@ -14,7 +14,7 @@ so a single connection with WAL is the simplest correct choice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 import aiosqlite
@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS students (
     region        TEXT NOT NULL,
     registered_at TEXT NOT NULL
 );
+
+-- One phone per registered student. Index variant is used (not column UNIQUE)
+-- so the constraint can also retrofit onto an existing deployment if the
+-- table predated this rule.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_students_phone_unique ON students(phone);
 
 CREATE TABLE IF NOT EXISTS questions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +157,13 @@ class Database:
             row = await cur.fetchone()
         return _row_to_student(row) if row else None
 
+    async def get_student_by_phone(self, phone: str) -> Optional[Student]:
+        async with self._conn.execute(
+            "SELECT * FROM students WHERE phone = ?", (phone,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_student(row) if row else None
+
     async def all_student_ids(self) -> list[int]:
         async with self._conn.execute(
             "SELECT user_id FROM students ORDER BY registered_at ASC"
@@ -226,6 +238,22 @@ class Database:
         )
         await self._conn.commit()
         return cur.lastrowid
+
+    async def count_recent_questions(self, user_id: int, hours: int) -> int:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=hours)
+        ).replace(microsecond=0).isoformat()
+        async with self._conn.execute(
+            """
+            SELECT COUNT(*) AS n
+              FROM questions
+             WHERE user_id = ?
+               AND created_at > ?
+            """,
+            (user_id, cutoff),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"] or 0)
 
     async def get_question(self, question_id: int) -> Optional[Question]:
         async with self._conn.execute(
