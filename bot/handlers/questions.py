@@ -56,7 +56,7 @@ async def on_text_question(
 
     qid = await db.add_text_question(student.user_id, text)
     await message.answer(texts.QUESTION_RECEIVED_TEXT)
-    await _notify_admins_text(bot, student, qid, text)
+    await _notify_admins_text(bot, db, student, qid, text)
 
 
 @router.message(F.voice, _is_non_admin)
@@ -77,7 +77,7 @@ async def on_voice_question(
     file_id = message.voice.file_id
     qid = await db.add_voice_question(student.user_id, file_id)
     await message.answer(texts.QUESTION_RECEIVED_VOICE)
-    await _notify_admins_voice(bot, student, qid, file_id, message.voice.duration)
+    await _notify_admins_voice(bot, db, student, qid, file_id, message.voice.duration)
 
 
 # Anything other than text or voice from a non-admin gets a nudge so users
@@ -97,7 +97,9 @@ async def on_unsupported(message: Message, state: FSMContext, db: Database) -> N
 # Admin notifications
 # ---------------------------------------------------------------------------
 
-async def _notify_admins_text(bot: Bot, student: Student, qid: int, text: str) -> None:
+async def _notify_admins_text(
+    bot: Bot, db: Database, student: Student, qid: int, text: str
+) -> None:
     header = texts.ADMIN_NEW_QUESTION_TEXT.format(
         qid=qid,
         name=_html(student.full_name),
@@ -107,23 +109,35 @@ async def _notify_admins_text(bot: Bot, student: Student, qid: int, text: str) -
         user_id=student.user_id,
         text=_html(text),
     )
-    kb = keyboards.admin_reply_keyboard(student.user_id)
+    kb = keyboards.admin_reply_keyboard(qid)
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, header, reply_markup=kb)
+            sent = await bot.send_message(admin_id, header, reply_markup=kb)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             log.warning("Failed to notify admin %s of text question: %s", admin_id, exc)
+            continue
         except Exception:  # pragma: no cover
             log.exception("Unexpected error notifying admin %s of text question", admin_id)
+            continue
+        await db.add_notification(
+            question_id=qid,
+            admin_id=admin_id,
+            message_id=sent.message_id,
+            original_text=header,
+        )
 
 
 async def _notify_admins_voice(
     bot: Bot,
+    db: Database,
     student: Student,
     qid: int,
     file_id: str,
     duration: Optional[int],
 ) -> None:
+    # Header carries metadata + the reply button. Voice goes in a separate
+    # message below it, with no button: this keeps the reply button on an
+    # editable text message so edit_message_text can mark it answered.
     header = texts.ADMIN_NEW_QUESTION_VOICE.format(
         qid=qid,
         name=_html(student.full_name),
@@ -134,15 +148,23 @@ async def _notify_admins_voice(
     )
     if duration is not None:
         header = f"{header}\nDavomiyligi: {duration} soniya"
-    kb = keyboards.admin_reply_keyboard(student.user_id)
+    kb = keyboards.admin_reply_keyboard(qid)
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, header)
-            await bot.send_voice(admin_id, file_id, reply_markup=kb)
+            sent = await bot.send_message(admin_id, header, reply_markup=kb)
+            await bot.send_voice(admin_id, file_id)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             log.warning("Failed to notify admin %s of voice question: %s", admin_id, exc)
+            continue
         except Exception:  # pragma: no cover
             log.exception("Unexpected error notifying admin %s of voice question", admin_id)
+            continue
+        await db.add_notification(
+            question_id=qid,
+            admin_id=admin_id,
+            message_id=sent.message_id,
+            original_text=header,
+        )
 
 
 def _html(text: Optional[str]) -> str:

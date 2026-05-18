@@ -1,8 +1,11 @@
 """SQLite persistence layer (async via aiosqlite).
 
 Schema:
-  students      : one row per Telegram user who completed registration.
-  questions     : one row per inbound question (text or voice).
+  students                : one row per Telegram user who completed registration.
+  questions               : one row per inbound question (text or voice).
+  question_notifications  : one row per (question, admin) pair, recording the
+                            Telegram message_id of the admin's notification so
+                            it can be edited when another admin answers.
 
 A single shared connection is opened at startup. SQLite serializes writes
 internally, and aiogram dispatches handlers in tasks on a single event loop,
@@ -40,6 +43,17 @@ CREATE TABLE IF NOT EXISTS questions (
 
 CREATE INDEX IF NOT EXISTS idx_questions_user_id ON questions(user_id);
 CREATE INDEX IF NOT EXISTS idx_questions_answered ON questions(answered_at);
+
+CREATE TABLE IF NOT EXISTS question_notifications (
+    question_id   INTEGER NOT NULL,
+    admin_id      INTEGER NOT NULL,
+    message_id    INTEGER NOT NULL,
+    original_text TEXT NOT NULL,
+    PRIMARY KEY (question_id, admin_id),
+    FOREIGN KEY (question_id) REFERENCES questions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qnotif_question ON question_notifications(question_id);
 """
 
 
@@ -52,6 +66,25 @@ class Student:
     program: str
     region: str
     registered_at: str
+
+
+@dataclass(frozen=True)
+class Question:
+    id: int
+    user_id: int
+    kind: str
+    content: Optional[str]
+    voice_file_id: Optional[str]
+    created_at: str
+    answered_at: Optional[str]
+
+
+@dataclass(frozen=True)
+class Notification:
+    question_id: int
+    admin_id: int
+    message_id: int
+    original_text: str
 
 
 class Database:
@@ -194,22 +227,65 @@ class Database:
         await self._conn.commit()
         return cur.lastrowid
 
-    async def mark_questions_answered(self, user_id: int) -> None:
-        """Mark all unanswered questions from this user as answered.
+    async def get_question(self, question_id: int) -> Optional[Question]:
+        async with self._conn.execute(
+            "SELECT * FROM questions WHERE id = ?", (question_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_question(row) if row else None
 
-        Admin replies are not pinned to a specific question, so the natural
-        semantics are: any reply clears that user's open queue.
-        """
+    async def mark_question_answered(self, question_id: int) -> None:
         await self._conn.execute(
             """
             UPDATE questions
                SET answered_at = ?
-             WHERE user_id = ?
+             WHERE id = ?
                AND answered_at IS NULL
             """,
-            (_utc_now_iso(), user_id),
+            (_utc_now_iso(), question_id),
         )
         await self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
+    async def add_notification(
+        self,
+        *,
+        question_id: int,
+        admin_id: int,
+        message_id: int,
+        original_text: str,
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT OR REPLACE INTO question_notifications
+                (question_id, admin_id, message_id, original_text)
+            VALUES (?, ?, ?, ?)
+            """,
+            (question_id, admin_id, message_id, original_text),
+        )
+        await self._conn.commit()
+
+    async def get_notifications(self, question_id: int) -> list[Notification]:
+        async with self._conn.execute(
+            """
+            SELECT question_id, admin_id, message_id, original_text
+              FROM question_notifications
+             WHERE question_id = ?
+            """,
+            (question_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            Notification(
+                question_id=r["question_id"],
+                admin_id=r["admin_id"],
+                message_id=r["message_id"],
+                original_text=r["original_text"],
+            )
+            for r in rows
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +305,18 @@ def _row_to_student(row: aiosqlite.Row) -> Student:
         program=row["program"],
         region=row["region"],
         registered_at=row["registered_at"],
+    )
+
+
+def _row_to_question(row: aiosqlite.Row) -> Question:
+    return Question(
+        id=row["id"],
+        user_id=row["user_id"],
+        kind=row["kind"],
+        content=row["content"],
+        voice_file_id=row["voice_file_id"],
+        created_at=row["created_at"],
+        answered_at=row["answered_at"],
     )
 
 

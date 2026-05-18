@@ -1,12 +1,14 @@
 """Admin commands and reply-forwarding flow.
 
 Admin reply flow:
-  1. Admin sees a question notification with a "Javob yozish" inline button.
+  1. Admin sees a per-question notification with a "Javob yozish" inline button
+     (callback_data = "admin:reply:<qid>").
   2. Clicking it puts the admin into AdminReply.waiting FSM state with the
-     target student's user_id stored in state.data["target_user_id"].
+     target question_id, the student's user_id, and the student's name.
   3. The next text or voice message from the admin is forwarded to the
-     student, the question queue for that student is marked answered, and the
-     state is cleared.
+     student, the specific question is marked answered, and every OTHER
+     admin's notification for that question gets its inline button removed
+     and "Javob berildi" appended so duplicate work is avoided.
   4. Admin may /cancel to exit reply mode.
 
 Non-admin attempts at admin commands are silently ignored.
@@ -23,7 +25,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import texts
 from ..config import ADMIN_IDS, BROADCAST_DELAY_SECONDS
@@ -127,20 +129,30 @@ async def cmd_export(message: Message, db: Database) -> None:
 @router.callback_query(F.data.startswith("admin:reply:"), _is_admin)
 async def cb_open_reply(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
     try:
-        target_id = int(cq.data.split(":")[-1])
+        qid = int(cq.data.split(":")[-1])
     except (ValueError, IndexError):
         with suppress(TelegramBadRequest):
             await cq.answer("Bad target.", show_alert=True)
         return
 
-    student = await db.get_student(target_id)
+    question = await db.get_question(qid)
+    if question is None:
+        with suppress(TelegramBadRequest):
+            await cq.answer("Savol topilmadi.", show_alert=True)
+        return
+
+    student = await db.get_student(question.user_id)
     if student is None:
         with suppress(TelegramBadRequest):
             await cq.answer("Foydalanuvchi topilmadi.", show_alert=True)
         return
 
     await state.set_state(AdminReply.waiting)
-    await state.update_data(target_user_id=target_id, target_name=student.full_name)
+    await state.update_data(
+        target_question_id=qid,
+        target_user_id=student.user_id,
+        target_name=student.full_name,
+    )
 
     await cq.message.answer(
         texts.ADMIN_REPLY_PROMPT.format(name=_html(student.full_name))
@@ -170,9 +182,10 @@ async def reply_with_text(
         return
 
     data = await state.get_data()
+    qid: Optional[int] = data.get("target_question_id")
     target_id: Optional[int] = data.get("target_user_id")
     target_name: str = data.get("target_name") or ""
-    if not target_id:
+    if not qid or not target_id:
         await message.answer(texts.ADMIN_REPLY_NO_TARGET)
         await state.clear()
         return
@@ -186,7 +199,8 @@ async def reply_with_text(
         await state.clear()
         return
 
-    await db.mark_questions_answered(target_id)
+    await db.mark_question_answered(qid)
+    await _mark_other_admins_answered(bot, db, qid, replying_admin_id=message.from_user.id)
     await message.answer(texts.ADMIN_REPLY_SENT.format(name=_html(target_name)))
     await state.clear()
 
@@ -199,9 +213,10 @@ async def reply_with_voice(
     bot: Bot,
 ) -> None:
     data = await state.get_data()
+    qid: Optional[int] = data.get("target_question_id")
     target_id: Optional[int] = data.get("target_user_id")
     target_name: str = data.get("target_name") or ""
-    if not target_id:
+    if not qid or not target_id:
         await message.answer(texts.ADMIN_REPLY_NO_TARGET)
         await state.clear()
         return
@@ -215,7 +230,8 @@ async def reply_with_voice(
         await state.clear()
         return
 
-    await db.mark_questions_answered(target_id)
+    await db.mark_question_answered(qid)
+    await _mark_other_admins_answered(bot, db, qid, replying_admin_id=message.from_user.id)
     await message.answer(texts.ADMIN_REPLY_SENT.format(name=_html(target_name)))
     await state.clear()
 
@@ -223,6 +239,51 @@ async def reply_with_voice(
 @router.message(AdminReply.waiting, _is_admin)
 async def reply_unsupported(message: Message) -> None:
     await message.answer(texts.ADMIN_REPLY_UNSUPPORTED)
+
+
+async def _mark_other_admins_answered(
+    bot: Bot,
+    db: Database,
+    qid: int,
+    *,
+    replying_admin_id: int,
+) -> None:
+    """Edit the original notification for every admin except the replier.
+
+    Appends the "Javob berildi" marker and strips the inline reply button so
+    other admins can see at a glance the question is closed and don't try
+    to answer again.
+    """
+    notifications = await db.get_notifications(qid)
+    # Telegram's editMessageText keeps the existing inline keyboard when
+    # reply_markup is omitted from the request, and aiogram's serializer
+    # strips reply_markup=None via exclude_none. We therefore send an
+    # explicit empty InlineKeyboardMarkup, which Telegram treats as
+    # "clear the keyboard."
+    cleared = InlineKeyboardMarkup(inline_keyboard=[])
+    for n in notifications:
+        if n.admin_id == replying_admin_id:
+            continue
+        new_text = n.original_text + texts.NOTIFICATION_ANSWERED_SUFFIX
+        try:
+            await bot.edit_message_text(
+                chat_id=n.admin_id,
+                message_id=n.message_id,
+                text=new_text,
+                reply_markup=cleared,
+            )
+        except (TelegramBadRequest, TelegramForbiddenError) as exc:
+            # Common causes: message too old to edit (>48h), admin blocked
+            # the bot, original message was deleted. Log and skip.
+            log.warning(
+                "Could not mark notification answered for admin %s qid=%s: %s",
+                n.admin_id, qid, exc,
+            )
+        except Exception:  # pragma: no cover (defensive)
+            log.exception(
+                "Unexpected error marking notification answered (admin=%s qid=%s)",
+                n.admin_id, qid,
+            )
 
 
 def _html(text: Optional[str]) -> str:

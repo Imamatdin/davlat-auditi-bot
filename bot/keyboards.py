@@ -8,7 +8,7 @@ Inline button callback_data conventions:
   reg:confirm        confirm summary
   reg:restart        restart from name
   reg:cancel         cancel FSM
-  admin:reply:<uid>  open reply mode for user <uid>
+  admin:reply:<qid>  open reply mode for question <qid>
 """
 from __future__ import annotations
 
@@ -80,12 +80,12 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def admin_reply_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def admin_reply_keyboard(question_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
                 text=texts.BTN_REPLY,
-                callback_data=f"admin:reply:{user_id}",
+                callback_data=f"admin:reply:{question_id}",
             )]
         ]
     )

@@ -201,6 +201,10 @@ ADMIN_REPLY_NO_TARGET = (
 # Student side: incoming admin reply
 STUDENT_REPLY_HEADER = "<b>Administrator javobi:</b>"
 
+# Appended to a notification after another admin has replied, so admins who
+# did not handle the question can see at a glance that it is closed.
+NOTIFICATION_ANSWERED_SUFFIX = "\n\n✅ Javob berildi"
+
 # Broadcast
 ADMIN_BROADCAST_USAGE = (
     "Foydalanish: <code>/broadcast xabar matni</code>\n"
