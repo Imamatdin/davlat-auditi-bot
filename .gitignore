@@ -16,6 +16,9 @@ env/
 *.db-wal
 *.db-shm
 
+# Data exports (contain student PII, e.g. phone numbers) - never commit
+*.csv
+
 # IDE
 .idea/
 .vscode/
