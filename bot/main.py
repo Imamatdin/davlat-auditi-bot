@@ -7,12 +7,8 @@ service from being put to sleep.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
-import os
 import signal
-import sqlite3
-from contextlib import suppress
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -21,7 +17,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
-from . import config
+from . import backup, config
 from .db import Database
 from .handlers import admin, questions, registration, start
 
@@ -58,84 +54,15 @@ async def _healthcheck(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def _make_restore_handler(db: Database, db_path: str, restore_token: str):
-    """One-off DB restore endpoint (disabled unless RESTORE_TOKEN is set).
-
-    PUT/POST the raw bytes of a SQLite file. It is validated (magic header +
-    integrity_check + students/questions tables), atomically swapped onto the
-    volume at db_path, and the process then exits non-zero so Railway restarts
-    it onto the restored DB. Auth is a constant-time token compare over HTTPS.
-    """
-    log = logging.getLogger(__name__)
-
-    async def _restore(request: web.Request) -> web.Response:
-        if not restore_token:
-            return web.Response(status=404, text="not found\n")
-        supplied = request.query.get("token") or request.headers.get("X-Restore-Token", "")
-        if not (supplied and hmac.compare_digest(supplied, restore_token)):
-            return web.Response(status=403, text="forbidden\n")
-
-        body = await request.read()
-        if not body.startswith(b"SQLite format 3\x00"):
-            return web.Response(status=400, text="not a sqlite database\n")
-
-        tmp = db_path + ".upload"
-        try:
-            with open(tmp, "wb") as f:
-                f.write(body)
-            con = sqlite3.connect(tmp)
-            integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
-            n_students = con.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-            n_questions = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
-            con.execute("PRAGMA journal_mode=DELETE")  # collapse to a single self-contained file
-            con.commit()
-            con.close()
-        except Exception as exc:
-            with suppress(FileNotFoundError):
-                os.remove(tmp)
-            return web.Response(status=400, text=f"invalid db: {exc}\n")
-        if integrity != "ok":
-            with suppress(FileNotFoundError):
-                os.remove(tmp)
-            return web.Response(status=400, text=f"integrity_check: {integrity}\n")
-
-        await db.close()
-        os.replace(tmp, db_path)
-        for sfx in ("-wal", "-shm", ".upload-wal", ".upload-shm"):
-            with suppress(FileNotFoundError):
-                os.remove(db_path + sfx)
-        log.warning(
-            "DB RESTORED via /restore (students=%s questions=%s). Exiting to restart.",
-            n_students, n_questions,
-        )
-        # Flush the response first, then exit non-zero so Railway (ON_FAILURE)
-        # restarts the process, which reopens the freshly swapped DB.
-        asyncio.get_running_loop().call_later(0.5, lambda: os._exit(42))
-        return web.Response(
-            text=f"restored: students={n_students} questions={n_questions}; restarting\n"
-        )
-
-    return _restore
-
-
-async def _start_health_server(
-    port: int, *, db: Database, db_path: str, restore_token: str
-) -> web.AppRunner:
-    log = logging.getLogger(__name__)
-    # 64 MiB cap so a DB upload is accepted (default aiohttp limit is 1 MiB).
-    app = web.Application(client_max_size=64 * 1024 * 1024)
+async def _start_health_server(port: int) -> web.AppRunner:
+    app = web.Application()
     app.router.add_get("/", _healthcheck)
     app.router.add_get("/healthz", _healthcheck)
-    restore = _make_restore_handler(db, db_path, restore_token)
-    app.router.add_route("PUT", "/restore", restore)
-    app.router.add_route("POST", "/restore", restore)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
-    log.info("Healthcheck listening on 0.0.0.0:%s", port)
-    if restore_token:
-        log.warning("/restore endpoint ENABLED (RESTORE_TOKEN set). Unset it after restoring.")
+    logging.getLogger(__name__).info("Healthcheck listening on 0.0.0.0:%s", port)
     return runner
 
 
@@ -171,12 +98,7 @@ async def main() -> None:
     # Drop any pending updates from previous runs to avoid double-processing.
     await bot.delete_webhook(drop_pending_updates=True)
 
-    health_runner = await _start_health_server(
-        config.PORT,
-        db=db,
-        db_path=config.DB_PATH,
-        restore_token=config.RESTORE_TOKEN,
-    )
+    health_runner = await _start_health_server(config.PORT)
 
     stop_event = asyncio.Event()
 
@@ -198,6 +120,7 @@ async def main() -> None:
 
     polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     stop_task = asyncio.create_task(stop_event.wait())
+    backup_task = asyncio.create_task(backup.backup_scheduler(bot, db))
 
     log.info("Bot started.")
     try:
@@ -218,6 +141,11 @@ async def main() -> None:
                 pass
     finally:
         log.info("Shutting down...")
+        backup_task.cancel()
+        try:
+            await backup_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await dp.stop_polling()
         except Exception:

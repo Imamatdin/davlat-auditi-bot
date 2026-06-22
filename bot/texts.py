@@ -339,6 +339,13 @@ ADMIN_BROADCAST_STALE = (
 ADMIN_EXPORT_EMPTY = "Eksport qilish uchun ma'lumot yo'q."
 ADMIN_EXPORT_CAPTION = "Ro'yxat: <b>{total}</b> ta foydalanuvchi."
 
+# Daily auto-backup (sent to every admin)
+ADMIN_BACKUP_CAPTION = (
+    "Kunlik zaxira nusxa ({date})\n"
+    "Jami talabalar: {total}\n"
+    "Javobsiz savollar: {q_unanswered}"
+)
+
 # ---------------------------------------------------------------------------
 # Programs (canonical labels for storage)
 # ---------------------------------------------------------------------------

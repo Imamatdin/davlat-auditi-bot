@@ -38,11 +38,6 @@ if not ADMIN_IDS:
 PORT: int = int(os.environ.get("PORT", "8080"))
 DB_PATH: str = os.environ.get("DB_PATH", "davlat_auditi.db")
 
-# One-off DB restore: when set, exposes a token-protected PUT /restore endpoint
-# that swaps the SQLite file on the volume. Leave UNSET in normal operation;
-# set it only while restoring, then unset it again.
-RESTORE_TOKEN: str = os.environ.get("RESTORE_TOKEN", "").strip()
-
 # Broadcast pacing: ~20 msg/sec is safe under Telegram's global limits.
 BROADCAST_DELAY_SECONDS: float = 0.05
 

@@ -294,6 +294,13 @@ class Database:
             row = await cur.fetchone()
         return _row_to_question(row) if row else None
 
+    async def all_questions(self) -> list[Question]:
+        async with self._conn.execute(
+            "SELECT * FROM questions ORDER BY id ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_question(r) for r in rows]
+
     async def mark_question_answered(self, question_id: int) -> None:
         await self._conn.execute(
             """
@@ -472,5 +479,21 @@ def students_to_csv_rows(students: Iterable[Student]) -> list[list[str]]:
             s.region,
             s.username or "",
             s.registered_at,
+        ])
+    return out
+
+
+def questions_to_csv_rows(questions: Iterable[Question]) -> list[list[str]]:
+    header = ["id", "user_id", "kind", "content", "voice_file_id", "created_at", "answered_at"]
+    out: list[list[str]] = [header]
+    for q in questions:
+        out.append([
+            str(q.id),
+            str(q.user_id),
+            q.kind,
+            q.content or "",
+            q.voice_file_id or "",
+            q.created_at,
+            q.answered_at or "",
         ])
     return out
