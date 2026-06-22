@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from aiohttp import web
 
 from . import backup, config
@@ -52,6 +53,38 @@ class DbInjector:
 
 async def _healthcheck(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
+
+
+async def _set_bot_commands(bot: Bot, log: logging.Logger) -> None:
+    """Populate the Telegram menu button: basic commands for everyone, the full
+    admin set scoped to each admin's private chat (a low-risk complement to the
+    tappable keyboards)."""
+    default = [
+        BotCommand(command="start", description="Boshlash / asosiy menyu"),
+        BotCommand(command="info", description="Mening ma'lumotlarim"),
+    ]
+    try:
+        await bot.set_my_commands(default, scope=BotCommandScopeDefault())
+    except Exception:  # pragma: no cover (network)
+        log.warning("Failed to set default bot commands", exc_info=True)
+    admin_cmds = [
+        BotCommand(command="admin", description="Administrator paneli"),
+        BotCommand(command="queue", description="Javobsiz savollar"),
+        BotCommand(command="stats", description="Statistika"),
+        BotCommand(command="faq_add", description="Tayyor javob qo'shish"),
+        BotCommand(command="faq_list", description="Tayyor javoblar"),
+        BotCommand(command="faq_del", description="Tayyor javobni o'chirish"),
+        BotCommand(command="broadcast", description="Hammaga xabar yuborish"),
+        BotCommand(command="export", description="CSV eksport"),
+        BotCommand(command="cancel", description="Joriy amalni bekor qilish"),
+    ]
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(
+                admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception:  # pragma: no cover (network / admin never started bot)
+            log.warning("Failed to set admin commands for %s", admin_id, exc_info=True)
 
 
 async def _start_health_server(port: int) -> web.AppRunner:
@@ -97,6 +130,7 @@ async def main() -> None:
 
     # Drop any pending updates from previous runs to avoid double-processing.
     await bot.delete_webhook(drop_pending_updates=True)
+    await _set_bot_commands(bot, log)
 
     health_runner = await _start_health_server(config.PORT)
 

@@ -82,8 +82,45 @@ async def cmd_admin(message: Message, db: Database) -> None:
             magistr=s["magistr"],
             q_total=s["q_total"],
             q_unanswered=s["q_unanswered"],
-        )
+        ),
+        reply_markup=keyboards.admin_menu_keyboard(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin menu (reply-keyboard buttons -> same actions as the slash commands)
+# ---------------------------------------------------------------------------
+
+_ADMIN_MENU_LABELS = {
+    texts.BTN_MENU_QUEUE,
+    texts.BTN_MENU_STATS,
+    texts.BTN_MENU_FAQ_LIST,
+    texts.BTN_MENU_FAQ_ADD,
+    texts.BTN_MENU_BROADCAST,
+    texts.BTN_MENU_EXPORT,
+}
+
+
+# Registered before the FAQ-add and reply text handlers and with no state
+# filter, so a menu tap is always handled here (never forwarded to a student
+# mid-reply, never eaten as FAQ-add input). State is cleared first so the tap
+# navigates cleanly out of any in-flight flow.
+@router.message(F.text.in_(_ADMIN_MENU_LABELS), _is_admin)
+async def on_admin_menu_button(message: Message, state: FSMContext, db: Database) -> None:
+    await state.clear()
+    label = message.text
+    if label == texts.BTN_MENU_QUEUE:
+        await cmd_queue(message, db)
+    elif label == texts.BTN_MENU_STATS:
+        await cmd_stats(message, db)
+    elif label == texts.BTN_MENU_FAQ_LIST:
+        await cmd_faq_list(message, db)
+    elif label == texts.BTN_MENU_FAQ_ADD:
+        await cmd_faq_add(message, state)
+    elif label == texts.BTN_MENU_BROADCAST:
+        await message.answer(texts.ADMIN_BROADCAST_USAGE)
+    elif label == texts.BTN_MENU_EXPORT:
+        await cmd_export(message, db)
 
 
 # ---------------------------------------------------------------------------

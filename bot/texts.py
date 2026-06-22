@@ -54,6 +54,23 @@ BTN_FAQ_SUGGEST = "💡 Tayyor javob: {keyword}"
 BTN_FAQ_CONFIRM_YES = "✅ Ha, yuborilsin"
 BTN_FAQ_CONFIRM_NO = "❌ Yo'q"
 
+# Admin reply-keyboard menu (tappable, instead of typing slash commands)
+BTN_MENU_QUEUE = "📋 Navbat"
+BTN_MENU_STATS = "📊 Statistika"
+BTN_MENU_FAQ_LIST = "💬 Tayyor javoblar"
+BTN_MENU_FAQ_ADD = "➕ Tayyor javob qo'shish"
+BTN_MENU_BROADCAST = "📢 Xabar yuborish"
+BTN_MENU_EXPORT = "📥 Eksport"
+ADMIN_MENU_HINT = "Quyidagi menyudan foydalaning yoki buyruq yozing."
+
+# Student inline menu
+BTN_STU_INFO = "ℹ️ Ma'lumotlarim"
+BTN_STU_HELP = "❓ Qanday savol berish"
+STUDENT_HELP = (
+    "Savol berish uchun shunchaki <b>matn</b> yoki <b>ovozli xabar</b> yuboring.\n"
+    "Administrator imkon qadar tezroq javob beradi."
+)
+
 # ---------------------------------------------------------------------------
 # Registration FSM prompts
 # ---------------------------------------------------------------------------

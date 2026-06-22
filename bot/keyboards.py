@@ -47,6 +47,20 @@ def contact_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def admin_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent tappable menu for admins, mirroring the slash commands."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=texts.BTN_MENU_QUEUE), KeyboardButton(text=texts.BTN_MENU_STATS)],
+            [KeyboardButton(text=texts.BTN_MENU_FAQ_LIST), KeyboardButton(text=texts.BTN_MENU_FAQ_ADD)],
+            [KeyboardButton(text=texts.BTN_MENU_BROADCAST), KeyboardButton(text=texts.BTN_MENU_EXPORT)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Menyu yoki buyruq",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Inline keyboards
 # ---------------------------------------------------------------------------
@@ -55,6 +69,18 @@ def start_keyboard(registered: bool) -> InlineKeyboardMarkup:
     text = texts.BTN_REREGISTER if registered else texts.BTN_REGISTER
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=text, callback_data="reg:start")]]
+    )
+
+
+def student_menu_keyboard() -> InlineKeyboardMarkup:
+    """Inline menu for registered students. Inline (not a reply keyboard) so the
+    buttons never collide with question text or the registration flow."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=texts.BTN_STU_INFO, callback_data="stu:info")],
+            [InlineKeyboardButton(text=texts.BTN_STU_HELP, callback_data="stu:help")],
+            [InlineKeyboardButton(text=texts.BTN_REREGISTER, callback_data="reg:start")],
+        ]
     )
 
 
