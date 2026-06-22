@@ -1,9 +1,11 @@
-"""Phone normalization, name/region validation, CSV serialization."""
+"""Phone normalization, name/region validation, CSV serialization,
+relative-time rendering, and FAQ keyword matching."""
 from __future__ import annotations
 
 import csv
 import io
 import re
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 # Strip everything that is not a digit or leading plus.
@@ -91,6 +93,75 @@ def _csv_escape(cell: str) -> str:
     if cell and cell[0] in _CSV_INJECTION_PREFIXES:
         return "'" + cell
     return cell
+
+
+def humanize_age(created_at_iso: str) -> str:
+    """Render how long ago `created_at_iso` (a UTC ISO timestamp) was, in Uzbek.
+
+    Buckets: hozirgina (<1 min), N daqiqa/soat/kun oldin. Returns "" if the
+    timestamp cannot be parsed.
+    """
+    try:
+        created = datetime.fromisoformat(created_at_iso)
+    except (ValueError, TypeError):
+        return ""
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    secs = int((datetime.now(timezone.utc) - created).total_seconds())
+    if secs < 60:
+        return "hozirgina"
+    minutes = secs // 60
+    if minutes < 60:
+        return f"{minutes} daqiqa oldin"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} soat oldin"
+    days = hours // 24
+    return f"{days} kun oldin"
+
+
+# Word characters for FAQ matching: Unicode letters/digits plus the Uzbek
+# apostrophe variants used in O', G'.
+_FAQ_WORD_RE = re.compile(r"[\w'’]+", re.UNICODE)
+# A storable keyword: 1..40 chars of letters/digits/space/hyphen/apostrophe.
+# Excludes <, >, &, / so the keyword renders safely in the suggestion hint.
+_FAQ_KEYWORD_RE = re.compile(r"^[\w'’ \-]{1,40}$", re.UNICODE)
+
+
+def normalize_keyword(raw: str) -> str:
+    """Lowercase and collapse whitespace so lookups are case/space insensitive."""
+    return " ".join((raw or "").lower().split())
+
+
+def is_valid_faq_keyword(keyword: str) -> bool:
+    """True iff `keyword` (already normalized) is safe to store and display."""
+    return bool(keyword) and bool(_FAQ_KEYWORD_RE.match(keyword))
+
+
+def suggest_faq_keyword(text: str, keywords: Iterable[str]) -> Optional[str]:
+    """Return the strongest matching FAQ keyword for `text`, or None.
+
+    Single-word keywords (>= 3 chars) must hit a whole word in the text;
+    multi-word keywords match as a substring. The longest matching keyword
+    wins, since a longer keyword is a more specific (stronger) signal.
+    """
+    if not text:
+        return None
+    lowered = text.lower()
+    tokens = set(_FAQ_WORD_RE.findall(lowered))
+    best: Optional[str] = None
+    best_len = 0
+    for kw in keywords:
+        k = (kw or "").strip().lower()
+        if not k:
+            continue
+        if " " in k:
+            matched = k in lowered
+        else:
+            matched = len(k) >= 3 and k in tokens
+        if matched and len(k) > best_len:
+            best, best_len = kw, len(k)
+    return best
 
 
 def build_students_csv(rows: Iterable[list[str]]) -> bytes:

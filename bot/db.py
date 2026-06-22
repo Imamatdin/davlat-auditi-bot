@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS question_notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_qnotif_question ON question_notifications(question_id);
+
+-- Canned answers an admin can reuse. keyword is the lookup handle (normalized
+-- to lowercase before storage) and is unique. created_at is preserved across
+-- re-adds of the same keyword (see add_faq).
+CREATE TABLE IF NOT EXISTS faq (
+    keyword     TEXT PRIMARY KEY,
+    answer_text TEXT NOT NULL,
+    created_by  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
 """
 
 
@@ -90,6 +100,25 @@ class Notification:
     admin_id: int
     message_id: int
     original_text: str
+
+
+@dataclass(frozen=True)
+class QueueItem:
+    """A single unanswered question joined with its author, for /queue."""
+    id: int
+    kind: str
+    content: Optional[str]
+    created_at: str
+    full_name: str
+    program: str
+
+
+@dataclass(frozen=True)
+class Faq:
+    keyword: str
+    answer_text: str
+    created_by: int
+    created_at: str
 
 
 class Database:
@@ -199,12 +228,15 @@ class Database:
             """
         ) as cur:
             qrow = await cur.fetchone()
+        q_total = qrow["q_total"] or 0
+        q_unanswered = qrow["q_unanswered"] or 0
         return {
             "total": srow["total"] or 0,
             "bakalavr": srow["bakalavr"] or 0,
             "magistr": srow["magistr"] or 0,
-            "q_total": qrow["q_total"] or 0,
-            "q_unanswered": qrow["q_unanswered"] or 0,
+            "q_total": q_total,
+            "q_unanswered": q_unanswered,
+            "q_answered": q_total - q_unanswered,
         }
 
     async def total_students(self) -> int:
@@ -274,6 +306,40 @@ class Database:
         )
         await self._conn.commit()
 
+    async def count_open_questions(self) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM questions WHERE answered_at IS NULL"
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"] or 0)
+
+    async def get_open_questions(self, *, limit: int, offset: int) -> list["QueueItem"]:
+        """Unanswered questions, oldest first, joined with author name+program."""
+        async with self._conn.execute(
+            """
+            SELECT q.id, q.kind, q.content, q.created_at,
+                   s.full_name, s.program
+              FROM questions q
+              JOIN students s ON s.user_id = q.user_id
+             WHERE q.answered_at IS NULL
+             ORDER BY q.created_at ASC, q.id ASC
+             LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            QueueItem(
+                id=r["id"],
+                kind=r["kind"],
+                content=r["content"],
+                created_at=r["created_at"],
+                full_name=r["full_name"],
+                program=r["program"],
+            )
+            for r in rows
+        ]
+
     # ------------------------------------------------------------------
     # Notifications
     # ------------------------------------------------------------------
@@ -315,6 +381,44 @@ class Database:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # FAQ (canned answers)
+    # ------------------------------------------------------------------
+    async def add_faq(self, *, keyword: str, answer_text: str, created_by: int) -> None:
+        # Re-adding an existing keyword updates the answer and editor but keeps
+        # the original created_at (DO UPDATE leaves created_at untouched).
+        await self._conn.execute(
+            """
+            INSERT INTO faq (keyword, answer_text, created_by, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(keyword) DO UPDATE SET
+                answer_text = excluded.answer_text,
+                created_by  = excluded.created_by
+            """,
+            (keyword, answer_text, created_by, _utc_now_iso()),
+        )
+        await self._conn.commit()
+
+    async def get_faq(self, keyword: str) -> Optional[Faq]:
+        async with self._conn.execute(
+            "SELECT keyword, answer_text, created_by, created_at FROM faq WHERE keyword = ?",
+            (keyword,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_faq(row) if row else None
+
+    async def all_faqs(self) -> list[Faq]:
+        async with self._conn.execute(
+            "SELECT keyword, answer_text, created_by, created_at FROM faq ORDER BY keyword ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_faq(r) for r in rows]
+
+    async def delete_faq(self, keyword: str) -> bool:
+        cur = await self._conn.execute("DELETE FROM faq WHERE keyword = ?", (keyword,))
+        await self._conn.commit()
+        return cur.rowcount > 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -345,6 +449,15 @@ def _row_to_question(row: aiosqlite.Row) -> Question:
         voice_file_id=row["voice_file_id"],
         created_at=row["created_at"],
         answered_at=row["answered_at"],
+    )
+
+
+def _row_to_faq(row: aiosqlite.Row) -> Faq:
+    return Faq(
+        keyword=row["keyword"],
+        answer_text=row["answer_text"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
     )
 
 

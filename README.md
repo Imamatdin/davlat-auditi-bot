@@ -8,7 +8,9 @@ Iqtisodiyot Universiteti.
 
 - **Student side**: Uzbek registration flow (name, phone, program, region) with
   confirmation, text + voice questions, `/info` to view their record.
-- **Admin side**: dashboard (`/admin`), reply-to-student flow (text or voice),
+- **Admin side**: dashboard (`/admin`), unanswered-question worklist (`/queue`),
+  question stats (`/stats`), reply-to-student flow (text or voice), reusable
+  canned answers (`/faq_add`, `/faq_list`, `/faq_del`, `/faq` in reply mode),
   `/broadcast`, CSV `/export`.
 - **Persistence**: SQLite (single file, WAL mode).
 - **Healthcheck**: tiny aiohttp endpoint on `PORT` so Railway never sleeps the
@@ -78,7 +80,11 @@ register the public URL with [UptimeRobot](https://uptimerobot.com) (free,
 The schema is created automatically on first run:
 
 - `students`: one row per registered user.
-- `questions`: one row per inbound question (`text` or `voice`).
+- `questions`: one row per inbound question (`text` or `voice`); `answered_at`
+  is `NULL` until an admin replies.
+- `question_notifications`: per-(question, admin) notification message id, so a
+  question can be marked answered across every admin's chat.
+- `faq`: reusable canned answers keyed by a normalized keyword.
 
 Backups: copy the SQLite file from the Railway volume. Locally, just copy
 `davlat_auditi.db`.
@@ -87,14 +93,33 @@ Backups: copy the SQLite file from the Railway volume. Locally, just copy
 
 | Command            | What it does                                                |
 |--------------------|-------------------------------------------------------------|
-| `/admin`           | Dashboard: counts, unanswered questions                     |
+| `/admin`           | Dashboard: counts, unanswered questions, command list       |
+| `/queue`           | Paged worklist of unanswered questions, oldest first        |
+| `/stats`           | Question stats: total, unanswered, answered                 |
+| `/faq_add`         | Save a reusable canned answer (asks for keyword, then text) |
+| `/faq_list`        | List all saved canned answers                               |
+| `/faq_del <kw>`    | Delete the canned answer with keyword `<kw>`                |
 | `/broadcast <msg>` | Send `<msg>` to every registered student (paced, ~20/sec)   |
 | `/export`          | Send a CSV file of all students                             |
-| `/cancel`          | Exit admin reply mode                                       |
+| `/cancel`          | Exit the current flow (reply mode, FAQ add, broadcast)      |
 
 Admin reply flow: each new question notification ships with a **Javob yozish**
 inline button. Click it, then send a text or voice message; the bot forwards
-it to the student and marks the question answered.
+it to the student and marks the question answered, closing out that
+notification (button removed, "✅ Javob berildi" appended) in every admin's
+chat.
+
+`/queue` is the worklist: it lists only unanswered questions (5 per page,
+oldest first, with how long each has waited), and each row has a numbered
+reply button. Pagination edits the same message in place.
+
+Canned answers: in reply mode, send `/faq <keyword>` to reply with a saved
+answer instead of typing it. When a new text question arrives, the bot
+keyword-matches it against saved FAQs and, on a strong match, adds a
+**Tayyor javob** button (plus a `/faq <keyword>` hint) to the notification.
+Tapping it shows the full answer with a **Yuborilsinmi?** Ha/Yo'q
+confirmation; the answer is only sent on Ha (no auto-send, to avoid a keyword
+false-positive replying to a student).
 
 ## Project layout
 
@@ -103,7 +128,7 @@ bot/
   main.py          entrypoint, dispatcher, healthcheck
   config.py        env-var parsing
   db.py            aiosqlite persistence
-  utils.py         phone normalization, CSV builder
+  utils.py         phone normalization, CSV builder, age + FAQ-match helpers
   keyboards.py     inline + reply keyboards
   texts.py         all Uzbek strings
   handlers/

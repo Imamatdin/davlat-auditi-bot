@@ -22,7 +22,7 @@ from typing import Optional
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
@@ -30,7 +30,16 @@ from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup
 from .. import keyboards, texts
 from ..config import ADMIN_IDS, BROADCAST_DELAY_SECONDS
 from ..db import Database, students_to_csv_rows
-from ..utils import build_students_csv
+from ..utils import (
+    build_students_csv,
+    humanize_age,
+    is_valid_faq_keyword,
+    normalize_keyword,
+    suggest_faq_keyword,
+)
+
+# Unanswered questions shown per /queue page.
+_QUEUE_PAGE_SIZE = 5
 
 # Max characters of the broadcast body we render inside the preview message.
 # Telegram's per-message limit is 4096; the surrounding template eats ~80,
@@ -47,6 +56,11 @@ class AdminReply(StatesGroup):
 
 class Broadcast(StatesGroup):
     confirm = State()
+
+
+class FaqAdd(StatesGroup):
+    keyword = State()
+    answer = State()
 
 
 def _is_admin(message_or_cq) -> bool:
@@ -70,6 +84,87 @@ async def cmd_admin(message: Message, db: Database) -> None:
             q_unanswered=s["q_unanswered"],
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# /stats
+# ---------------------------------------------------------------------------
+
+@router.message(Command("stats"), _is_admin)
+async def cmd_stats(message: Message, db: Database) -> None:
+    s = await db.stats()
+    await message.answer(
+        texts.ADMIN_STATS.format(
+            q_total=s["q_total"],
+            q_unanswered=s["q_unanswered"],
+            q_answered=s["q_answered"],
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# /queue  (worklist of unanswered questions, oldest first, edit-in-place pages)
+# ---------------------------------------------------------------------------
+
+async def _render_queue(db: Database, page: int):
+    """Build (text, keyboard) for queue `page`. Returns keyboard=None when the
+    queue is empty. Page is clamped into range so a stale page index (e.g. the
+    last page after questions were answered elsewhere) still renders."""
+    total = await db.count_open_questions()
+    if total == 0:
+        return texts.ADMIN_QUEUE_EMPTY, None
+
+    pages = (total + _QUEUE_PAGE_SIZE - 1) // _QUEUE_PAGE_SIZE
+    page = max(0, min(page, pages - 1))
+    offset = page * _QUEUE_PAGE_SIZE
+    items = await db.get_open_questions(limit=_QUEUE_PAGE_SIZE, offset=offset)
+
+    parts = [texts.ADMIN_QUEUE_HEADER.format(total=total, page=page + 1, pages=pages)]
+    ids: list[int] = []
+    for i, it in enumerate(items):
+        ids.append(it.id)
+        if it.kind == "voice":
+            body = texts.QUEUE_VOICE_LABEL
+        else:
+            raw = it.content or ""
+            if len(raw) > 200:
+                raw = raw[:200] + "..."
+            body = _html(raw)
+        parts.append(
+            texts.ADMIN_QUEUE_ITEM.format(
+                idx=offset + i + 1,
+                name=_html(it.full_name),
+                program=_html(it.program),
+                waited=humanize_age(it.created_at),
+                body=body,
+            )
+        )
+    kb = keyboards.queue_keyboard(ids, page=page, pages=pages, start_no=offset + 1)
+    return "".join(parts), kb
+
+
+@router.message(Command("queue"), _is_admin)
+async def cmd_queue(message: Message, db: Database) -> None:
+    text, kb = await _render_queue(db, 0)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("admin:queue:"), _is_admin)
+async def cb_queue_page(cq: CallbackQuery, db: Database) -> None:
+    try:
+        page = int(cq.data.split(":")[-1])
+    except (ValueError, IndexError):
+        with suppress(TelegramBadRequest):
+            await cq.answer()
+        return
+    text, kb = await _render_queue(db, page)
+    # editMessageText keeps the old keyboard when reply_markup is omitted, so
+    # pass an explicit empty markup to clear it once the queue drains.
+    markup = kb if kb is not None else InlineKeyboardMarkup(inline_keyboard=[])
+    with suppress(TelegramBadRequest):
+        await cq.message.edit_text(text, reply_markup=markup)
+    with suppress(TelegramBadRequest):
+        await cq.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +285,119 @@ async def cmd_export(message: Message, db: Database) -> None:
 
 
 # ---------------------------------------------------------------------------
+# FAQ management: /faq_add (FSM), /faq_list, /faq_del
+# ---------------------------------------------------------------------------
+
+@router.message(Command("faq_add"), _is_admin)
+async def cmd_faq_add(message: Message, state: FSMContext) -> None:
+    await state.set_state(FaqAdd.keyword)
+    await message.answer(texts.ADMIN_FAQ_ADD_ASK_KEYWORD)
+
+
+@router.message(Command("cancel"), StateFilter(FaqAdd.keyword, FaqAdd.answer), _is_admin)
+async def cmd_cancel_faq(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(texts.ADMIN_FAQ_CANCELLED)
+
+
+@router.message(FaqAdd.keyword, F.text, _is_admin)
+async def faq_add_keyword(message: Message, state: FSMContext, db: Database) -> None:
+    raw = message.text or ""
+    # /cancel is handled above; any other slash command is not a keyword.
+    if raw.startswith("/"):
+        await message.answer(texts.ADMIN_FAQ_ADD_KEYWORD_INVALID)
+        return
+    keyword = normalize_keyword(raw)
+    if not is_valid_faq_keyword(keyword):
+        await message.answer(texts.ADMIN_FAQ_ADD_KEYWORD_INVALID)
+        return
+    existed = await db.get_faq(keyword) is not None
+    await state.update_data(faq_keyword=keyword, faq_existed=existed)
+    await state.set_state(FaqAdd.answer)
+    await message.answer(texts.ADMIN_FAQ_ADD_ASK_ANSWER.format(keyword=_html(keyword)))
+
+
+@router.message(FaqAdd.keyword, _is_admin)
+async def faq_add_keyword_other(message: Message) -> None:
+    await message.answer(texts.ADMIN_FAQ_ADD_KEYWORD_INVALID)
+
+
+@router.message(FaqAdd.answer, F.text, _is_admin)
+async def faq_add_answer(message: Message, state: FSMContext, db: Database) -> None:
+    raw = message.text or ""
+    if raw.startswith("/"):
+        await message.answer(texts.ADMIN_FAQ_ADD_ANSWER_INVALID)
+        return
+    answer = raw.strip()
+    if not answer:
+        await message.answer(texts.ADMIN_FAQ_ADD_ANSWER_INVALID)
+        return
+    data = await state.get_data()
+    keyword = data.get("faq_keyword")
+    existed = bool(data.get("faq_existed"))
+    if not keyword:
+        await state.clear()
+        await message.answer(texts.ADMIN_FAQ_ADD_KEYWORD_INVALID)
+        return
+    # Store the answer raw; it is HTML-escaped at send/display time since the
+    # bot's default parse mode is HTML.
+    await db.add_faq(keyword=keyword, answer_text=answer, created_by=message.from_user.id)
+    await state.clear()
+    msg = texts.ADMIN_FAQ_ADD_SAVED.format(keyword=_html(keyword))
+    if existed:
+        msg += "\n" + texts.ADMIN_FAQ_ADD_OVERWRITE.format(keyword=_html(keyword))
+    await message.answer(msg)
+
+
+@router.message(FaqAdd.answer, _is_admin)
+async def faq_add_answer_other(message: Message) -> None:
+    await message.answer(texts.ADMIN_FAQ_ADD_ANSWER_INVALID)
+
+
+@router.message(Command("faq_list"), _is_admin)
+async def cmd_faq_list(message: Message, db: Database) -> None:
+    faqs = await db.all_faqs()
+    if not faqs:
+        await message.answer(texts.ADMIN_FAQ_LIST_EMPTY)
+        return
+    # Render into one or more messages, flushing before Telegram's 4096-char
+    # limit so a long FAQ set still lists in full instead of failing to send.
+    chunk = texts.ADMIN_FAQ_LIST_HEADER.format(total=len(faqs))
+    for f in faqs:
+        ans = f.answer_text
+        if len(ans) > 200:
+            ans = ans[:200] + "..."
+        item = texts.ADMIN_FAQ_LIST_ITEM.format(
+            keyword=_html(f.keyword), answer=_html(ans)
+        )
+        if len(chunk) + len(item) > 3500:
+            await message.answer(chunk)
+            chunk = ""
+        chunk += item
+    if chunk:
+        await message.answer(chunk)
+
+
+@router.message(Command("faq_del"), _is_admin)
+async def cmd_faq_del(message: Message, command: CommandObject, db: Database) -> None:
+    keyword = normalize_keyword(command.args or "")
+    if not keyword:
+        await message.answer(texts.ADMIN_FAQ_DEL_USAGE)
+        return
+    if await db.delete_faq(keyword):
+        await message.answer(texts.ADMIN_FAQ_DEL_OK.format(keyword=_html(keyword)))
+    else:
+        await message.answer(texts.ADMIN_FAQ_DEL_NOT_FOUND.format(keyword=_html(keyword)))
+
+
+# /faq typed outside reply mode is a dead-end on its own (Telegram only makes
+# the bare "/faq" token tappable, dropping the keyword), so guide the admin.
+@router.message(Command("faq"), StateFilter(None), _is_admin)
+async def cmd_faq_guidance(message: Message) -> None:
+    await message.answer(texts.ADMIN_FAQ_NEED_REPLY_MODE)
+
+
+# ---------------------------------------------------------------------------
 # Reply mode
 # ---------------------------------------------------------------------------
 
@@ -228,10 +436,172 @@ async def cb_open_reply(cq: CallbackQuery, state: FSMContext, db: Database) -> N
         await cq.answer()
 
 
+@router.callback_query(F.data.startswith("admin:faqsug:"), _is_admin)
+async def cb_faq_suggest(cq: CallbackQuery, db: Database) -> None:
+    """Tap the suggested canned answer -> show it with a Ha/Yo'q confirmation.
+
+    Sending is deferred to cb_faq_send so the admin reviews the full answer
+    first. This guards against a keyword false-positive auto-replying to a
+    prospective student. The keyword is recomputed from the question text
+    against the current FAQ set, then carried into the confirm button so the
+    send uses exactly the answer shown here.
+    """
+    try:
+        qid = int(cq.data.split(":")[-1])
+    except (ValueError, IndexError):
+        with suppress(TelegramBadRequest):
+            await cq.answer()
+        return
+
+    question = await db.get_question(qid)
+    if question is None:
+        with suppress(TelegramBadRequest):
+            await cq.answer("Savol topilmadi.", show_alert=True)
+        return
+    if question.answered_at is not None:
+        with suppress(TelegramBadRequest):
+            await cq.answer(texts.ADMIN_FAQ_SUGGEST_ALREADY, show_alert=True)
+        return
+
+    faqs = await db.all_faqs()
+    keyword = suggest_faq_keyword(question.content or "", [f.keyword for f in faqs])
+    faq = await db.get_faq(keyword) if keyword else None
+    if faq is None:
+        with suppress(TelegramBadRequest):
+            await cq.answer(texts.ADMIN_FAQ_SUGGEST_GONE, show_alert=True)
+        return
+
+    await cq.message.answer(
+        texts.ADMIN_FAQ_CONFIRM.format(
+            keyword=_html(keyword), answer=_html(faq.answer_text)
+        ),
+        reply_markup=keyboards.faq_confirm_keyboard(qid, keyword),
+    )
+    with suppress(TelegramBadRequest):
+        await cq.answer()
+
+
+@router.callback_query(F.data.startswith("admin:faqok:"), _is_admin)
+async def cb_faq_send(cq: CallbackQuery, db: Database, bot: Bot) -> None:
+    """Confirmed (Ha) send of the suggested canned answer."""
+    parts = cq.data.split(":")  # admin:faqok:<qid>[:<keyword>]
+    try:
+        qid = int(parts[2])
+    except (ValueError, IndexError):
+        with suppress(TelegramBadRequest):
+            await cq.answer()
+        return
+    # Keyword (if carried) holds no ':' by validation, so parts[3] is whole.
+    carried_keyword = parts[3] if len(parts) > 3 and parts[3] else None
+
+    question = await db.get_question(qid)
+    if question is None:
+        await _finish_confirm(cq, "Savol topilmadi.")
+        return
+    if question.answered_at is not None:
+        await _finish_confirm(cq, texts.ADMIN_FAQ_SUGGEST_ALREADY)
+        return
+    student = await db.get_student(question.user_id)
+    if student is None:
+        await _finish_confirm(cq, "Foydalanuvchi topilmadi.")
+        return
+
+    keyword = carried_keyword
+    if keyword is None:
+        faqs = await db.all_faqs()
+        keyword = suggest_faq_keyword(question.content or "", [f.keyword for f in faqs])
+    faq = await db.get_faq(keyword) if keyword else None
+    if faq is None:
+        await _finish_confirm(cq, texts.ADMIN_FAQ_SUGGEST_GONE)
+        return
+
+    body = f"{texts.STUDENT_REPLY_HEADER}\n\n{_html(faq.answer_text)}"
+    try:
+        await bot.send_message(student.user_id, body)
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        log.warning("Suggested reply to %s failed: %s", student.user_id, exc)
+        await _finish_confirm(cq, texts.ADMIN_REPLY_FAILED)
+        return
+
+    await db.mark_question_answered(qid)
+    await _mark_question_answered_notifications(bot, db, qid)
+    await _finish_confirm(
+        cq,
+        texts.ADMIN_FAQ_CONFIRM_SENT.format(keyword=_html(keyword)),
+        toast=texts.ADMIN_FAQ_SUGGEST_SENT.format(keyword=keyword),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:faqno:"), _is_admin)
+async def cb_faq_cancel(cq: CallbackQuery) -> None:
+    """Declined (Yo'q): drop the suggestion, leave the question open."""
+    await _finish_confirm(cq, texts.ADMIN_FAQ_CONFIRM_CANCELLED)
+
+
+async def _finish_confirm(
+    cq: CallbackQuery, text: str, *, toast: Optional[str] = None
+) -> None:
+    """Replace the confirmation message with a final status and clear buttons."""
+    with suppress(TelegramBadRequest):
+        await cq.message.edit_text(
+            text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[])
+        )
+    with suppress(TelegramBadRequest):
+        if toast:
+            await cq.answer(toast)
+        else:
+            await cq.answer()
+
+
 @router.message(Command("cancel"), AdminReply.waiting, _is_admin)
 async def cmd_cancel_reply(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(texts.ADMIN_REPLY_CANCELLED)
+
+
+# Registered before the generic reply_with_text so "/faq <keyword>" in reply
+# mode sends a canned answer instead of being rejected as a stray command.
+@router.message(Command("faq"), AdminReply.waiting, _is_admin)
+async def cmd_faq_in_reply(
+    message: Message,
+    command: CommandObject,
+    state: FSMContext,
+    db: Database,
+    bot: Bot,
+) -> None:
+    keyword = normalize_keyword(command.args or "")
+    if not keyword:
+        await message.answer(texts.ADMIN_FAQ_REPLY_USAGE)
+        return  # stay in reply mode
+    faq = await db.get_faq(keyword)
+    if faq is None:
+        await message.answer(
+            texts.ADMIN_FAQ_REPLY_NOT_FOUND.format(keyword=_html(keyword))
+        )
+        return  # stay in reply mode
+
+    data = await state.get_data()
+    qid: Optional[int] = data.get("target_question_id")
+    target_id: Optional[int] = data.get("target_user_id")
+    target_name: str = data.get("target_name") or ""
+    if not qid or not target_id:
+        await message.answer(texts.ADMIN_REPLY_NO_TARGET)
+        await state.clear()
+        return
+
+    body = f"{texts.STUDENT_REPLY_HEADER}\n\n{_html(faq.answer_text)}"
+    try:
+        await bot.send_message(target_id, body)
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        log.warning("FAQ reply to %s failed: %s", target_id, exc)
+        await message.answer(texts.ADMIN_REPLY_FAILED)
+        await state.clear()
+        return
+
+    await db.mark_question_answered(qid)
+    await _mark_question_answered_notifications(bot, db, qid)
+    await message.answer(texts.ADMIN_REPLY_SENT.format(name=_html(target_name)))
+    await state.clear()
 
 
 @router.message(AdminReply.waiting, F.text, _is_admin)
@@ -267,7 +637,7 @@ async def reply_with_text(
         return
 
     await db.mark_question_answered(qid)
-    await _mark_other_admins_answered(bot, db, qid, replying_admin_id=message.from_user.id)
+    await _mark_question_answered_notifications(bot, db, qid)
     await message.answer(texts.ADMIN_REPLY_SENT.format(name=_html(target_name)))
     await state.clear()
 
@@ -298,7 +668,7 @@ async def reply_with_voice(
         return
 
     await db.mark_question_answered(qid)
-    await _mark_other_admins_answered(bot, db, qid, replying_admin_id=message.from_user.id)
+    await _mark_question_answered_notifications(bot, db, qid)
     await message.answer(texts.ADMIN_REPLY_SENT.format(name=_html(target_name)))
     await state.clear()
 
@@ -308,18 +678,17 @@ async def reply_unsupported(message: Message) -> None:
     await message.answer(texts.ADMIN_REPLY_UNSUPPORTED)
 
 
-async def _mark_other_admins_answered(
+async def _mark_question_answered_notifications(
     bot: Bot,
     db: Database,
     qid: int,
-    *,
-    replying_admin_id: int,
 ) -> None:
-    """Edit the original notification for every admin except the replier.
+    """Mark every stored notification for `qid` as answered.
 
-    Appends the "Javob berildi" marker and strips the inline reply button so
-    other admins can see at a glance the question is closed and don't try
-    to answer again.
+    Appends the "Javob berildi" marker and strips the inline reply button on
+    each admin's original notification, including the admin who just replied,
+    so the question is never presented as open again (critical when there is
+    only one admin: their own notification must close out, not just others').
     """
     notifications = await db.get_notifications(qid)
     # Telegram's editMessageText keeps the existing inline keyboard when
@@ -329,8 +698,6 @@ async def _mark_other_admins_answered(
     # "clear the keyboard."
     cleared = InlineKeyboardMarkup(inline_keyboard=[])
     for n in notifications:
-        if n.admin_id == replying_admin_id:
-            continue
         new_text = n.original_text + texts.NOTIFICATION_ANSWERED_SUFFIX
         try:
             await bot.edit_message_text(

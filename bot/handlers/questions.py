@@ -16,6 +16,7 @@ from aiogram.types import Message
 from .. import keyboards, texts
 from ..config import ADMIN_IDS
 from ..db import Database, Student
+from ..utils import suggest_faq_keyword
 
 log = logging.getLogger(__name__)
 router = Router(name="questions")
@@ -121,10 +122,18 @@ async def _notify_admins_text(
         user_id=student.user_id,
         text=_html(text),
     )
-    kb = keyboards.admin_reply_keyboard(qid)
+    # Bonus: suggest a saved canned answer if one strongly matches. The hint
+    # is appended to the SENT message only; we store the un-hinted header so
+    # that marking the question answered later edits to a clean text + suffix.
+    faqs = await db.all_faqs()
+    suggestion = suggest_faq_keyword(text, [f.keyword for f in faqs])
+    sent_text = header
+    if suggestion:
+        sent_text = header + texts.ADMIN_FAQ_SUGGESTION.format(keyword=suggestion)
+    kb = keyboards.admin_reply_keyboard(qid, suggestion=suggestion)
     for admin_id in ADMIN_IDS:
         try:
-            sent = await bot.send_message(admin_id, header, reply_markup=kb)
+            sent = await bot.send_message(admin_id, sent_text, reply_markup=kb)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             log.warning("Failed to notify admin %s of text question: %s", admin_id, exc)
             continue

@@ -46,6 +46,13 @@ BTN_CANCEL = "Bekor qilish"
 BTN_REPLY = "Javob yozish"
 BTN_YES = "Ha, yuborilsin"
 BTN_NO = "Yo'q, bekor qilish"
+BTN_PREV = "⬅️ Oldingi"
+BTN_NEXT = "Keyingi ➡️"
+BTN_REFRESH = "🔄 Yangilash"
+# Filled with the matched keyword, e.g. "💡 Tayyor javob: stipendiya"
+BTN_FAQ_SUGGEST = "💡 Tayyor javob: {keyword}"
+BTN_FAQ_CONFIRM_YES = "✅ Ha, yuborilsin"
+BTN_FAQ_CONFIRM_NO = "❌ Yo'q"
 
 # ---------------------------------------------------------------------------
 # Registration FSM prompts
@@ -181,10 +188,108 @@ ADMIN_DASHBOARD = (
     "Jami savollar: <b>{q_total}</b>\n"
     "Javobsiz savollar: <b>{q_unanswered}</b>\n\n"
     "Buyruqlar:\n"
+    "/queue, javobsiz savollar ro'yxati\n"
+    "/stats, savollar statistikasi\n"
+    "/faq_add, tayyor javob qo'shish\n"
+    "/faq_list, tayyor javoblar ro'yxati\n"
+    "/faq_del &lt;kalit&gt;, tayyor javobni o'chirish\n"
     "/broadcast &lt;xabar&gt;, hammaga xabar yuborish\n"
     "/export, ro'yxatni CSV qilib yuklab olish\n"
-    "/cancel, javob yozish rejimini bekor qilish"
+    "/cancel, joriy amalni bekor qilish"
 )
+
+# ---------------------------------------------------------------------------
+# /queue (admin worklist of unanswered questions)
+# ---------------------------------------------------------------------------
+
+ADMIN_QUEUE_EMPTY = "Javobsiz savollar yo'q. ✅"
+ADMIN_QUEUE_HEADER = (
+    "<b>Javobsiz savollar:</b> {total} ta\n"
+    "Sahifa {page}/{pages}\n"
+)
+# idx = displayed number, matching the "✍️ N" button below the message.
+ADMIN_QUEUE_ITEM = (
+    "\n<b>{idx}. {name}</b> ({program})\n"
+    "{waited}\n"
+    "{body}\n"
+)
+QUEUE_VOICE_LABEL = "[Ovozli]"
+
+# ---------------------------------------------------------------------------
+# /stats
+# ---------------------------------------------------------------------------
+
+ADMIN_STATS = (
+    "<b>Savollar statistikasi</b>\n\n"
+    "Jami savollar: <b>{q_total}</b>\n"
+    "Javobsiz: <b>{q_unanswered}</b>\n"
+    "Javob berilgan: <b>{q_answered}</b>"
+)
+
+# ---------------------------------------------------------------------------
+# FAQ (canned answers)
+# ---------------------------------------------------------------------------
+
+ADMIN_FAQ_ADD_ASK_KEYWORD = (
+    "Yangi tayyor javob qo'shamiz.\n\n"
+    "Avval qisqa <b>kalit so'z</b> yuboring (masalan: stipendiya).\n"
+    "Bekor qilish uchun /cancel."
+)
+ADMIN_FAQ_ADD_ASK_ANSWER = (
+    "Endi <b>{keyword}</b> uchun javob matnini yuboring.\n"
+    "Bekor qilish uchun /cancel."
+)
+ADMIN_FAQ_ADD_KEYWORD_INVALID = (
+    "Kalit so'z noto'g'ri. Faqat qisqa matn (harf, raqam, bo'sh joy), "
+    "40 belgigacha. Qaytadan yuboring yoki /cancel."
+)
+ADMIN_FAQ_ADD_ANSWER_INVALID = (
+    "Javob matni bo'sh bo'lmasligi kerak. Matn yuboring yoki /cancel."
+)
+ADMIN_FAQ_ADD_SAVED = (
+    "Saqlandi: <b>{keyword}</b>.\n"
+    "Javob rejimida <code>/faq {keyword}</code> yozsangiz, bu javob talabaga yuboriladi."
+)
+ADMIN_FAQ_ADD_OVERWRITE = "(Eslatma: <b>{keyword}</b> avval mavjud edi, yangilandi.)"
+ADMIN_FAQ_CANCELLED = "Bekor qilindi."
+
+ADMIN_FAQ_LIST_EMPTY = "Hozircha tayyor javoblar yo'q. Qo'shish uchun /faq_add."
+ADMIN_FAQ_LIST_HEADER = "<b>Tayyor javoblar:</b> {total} ta\n"
+ADMIN_FAQ_LIST_ITEM = "\n<b>{keyword}</b>\n{answer}\n"
+
+ADMIN_FAQ_DEL_USAGE = "Foydalanish: <code>/faq_del kalit_so'z</code>"
+ADMIN_FAQ_DEL_OK = "O'chirildi: <b>{keyword}</b>"
+ADMIN_FAQ_DEL_NOT_FOUND = "Bunday kalit so'z topilmadi: <b>{keyword}</b>"
+
+# /faq used inside reply mode
+ADMIN_FAQ_REPLY_USAGE = (
+    "Foydalanish: <code>/faq kalit_so'z</code>\n"
+    "Mavjud kalit so'zlar uchun /faq_list."
+)
+ADMIN_FAQ_REPLY_NOT_FOUND = (
+    "Bunday tayyor javob yo'q: <b>{keyword}</b>. Ro'yxat uchun /faq_list."
+)
+# /faq tapped/typed outside reply mode
+ADMIN_FAQ_NEED_REPLY_MODE = (
+    "Tayyor javob yuborish uchun avval savol ostidagi <b>Javob yozish</b> "
+    "tugmasini bosing, keyin <code>/faq kalit_so'z</code> yuboring.\n"
+    "Yangi savol bildirishnomasidagi <b>Tayyor javob</b> tugmasi esa bir bosishda yuboradi."
+)
+# Suggestion hint appended to a fresh question notification. Plain text (no
+# <code>) so the /faq command stays visible; the one-tap button does the work.
+ADMIN_FAQ_SUGGESTION = "\n\n💡 Tavsiya: /faq {keyword}"
+# Suggestion outcomes (callback answers / confirmation flow)
+ADMIN_FAQ_SUGGEST_SENT = "Tayyor javob yuborildi: {keyword}"
+ADMIN_FAQ_SUGGEST_GONE = "Tavsiya endi mavjud emas. Qo'lda javob bering."
+ADMIN_FAQ_SUGGEST_ALREADY = "Bu savolga allaqachon javob berilgan."
+# Shown (as a new message) when the admin taps the suggestion, before sending.
+# {answer} is the full canned answer so the admin reviews it before confirming.
+ADMIN_FAQ_CONFIRM = (
+    "Quyidagi tayyor javob (<b>{keyword}</b>) talabaga yuborilsinmi?\n\n"
+    "{answer}"
+)
+ADMIN_FAQ_CONFIRM_SENT = "✅ Yuborildi: <b>{keyword}</b>"
+ADMIN_FAQ_CONFIRM_CANCELLED = "Bekor qilindi. Tayyor javob yuborilmadi."
 
 ADMIN_REPLY_PROMPT = (
     "<b>{name}</b> ga javob yozing.\n"
