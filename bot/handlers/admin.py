@@ -55,6 +55,7 @@ class AdminReply(StatesGroup):
 
 
 class Broadcast(StatesGroup):
+    compose = State()
     confirm = State()
 
 
@@ -118,7 +119,10 @@ async def on_admin_menu_button(message: Message, state: FSMContext, db: Database
     elif label == texts.BTN_MENU_FAQ_ADD:
         await cmd_faq_add(message, state)
     elif label == texts.BTN_MENU_BROADCAST:
-        await message.answer(texts.ADMIN_BROADCAST_USAGE)
+        # Start a guided broadcast: the next message becomes the body. (State
+        # was cleared above, so this is a clean entry into the compose step.)
+        await state.set_state(Broadcast.compose)
+        await message.answer(texts.ADMIN_BROADCAST_ASK)
     elif label == texts.BTN_MENU_EXPORT:
         await cmd_export(message, db)
 
@@ -208,6 +212,25 @@ async def cb_queue_page(cq: CallbackQuery, db: Database) -> None:
 # /broadcast
 # ---------------------------------------------------------------------------
 
+async def _start_broadcast_preview(
+    message: Message, state: FSMContext, db: Database, text: str
+) -> None:
+    """Move to the confirm step: stash the text and show the preview + buttons.
+    Shared by the /broadcast command and the menu-driven compose flow."""
+    total = len(await db.all_student_ids())
+    if total == 0:
+        await state.clear()
+        await message.answer(texts.ADMIN_BROADCAST_EMPTY)
+        return
+    await state.set_state(Broadcast.confirm)
+    await state.update_data(broadcast_text=text)
+    preview_body = text if len(text) <= _PREVIEW_MAX else text[:_PREVIEW_MAX] + "..."
+    await message.answer(
+        texts.ADMIN_BROADCAST_PREVIEW.format(total=total, preview=_html(preview_body)),
+        reply_markup=keyboards.broadcast_confirm_keyboard(),
+    )
+
+
 @router.message(Command("broadcast"), _is_admin)
 async def cmd_broadcast(
     message: Message,
@@ -219,23 +242,7 @@ async def cmd_broadcast(
     if not text:
         await message.answer(texts.ADMIN_BROADCAST_USAGE)
         return
-
-    total = len(await db.all_student_ids())
-    if total == 0:
-        await message.answer(texts.ADMIN_BROADCAST_EMPTY)
-        return
-
-    await state.set_state(Broadcast.confirm)
-    await state.update_data(broadcast_text=text)
-
-    preview_body = text if len(text) <= _PREVIEW_MAX else text[:_PREVIEW_MAX] + "..."
-    await message.answer(
-        texts.ADMIN_BROADCAST_PREVIEW.format(
-            total=total,
-            preview=_html(preview_body),
-        ),
-        reply_markup=keyboards.broadcast_confirm_keyboard(),
-    )
+    await _start_broadcast_preview(message, state, db, text)
 
 
 @router.callback_query(Broadcast.confirm, F.data == "admin:bcast:no", _is_admin)
@@ -296,10 +303,22 @@ async def cb_broadcast_yes(
     await cq.message.answer(texts.ADMIN_BROADCAST_DONE.format(ok=ok, fail=fail))
 
 
-@router.message(Command("cancel"), Broadcast.confirm, _is_admin)
+@router.message(Command("cancel"), StateFilter(Broadcast.confirm, Broadcast.compose), _is_admin)
 async def cmd_cancel_broadcast(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(texts.ADMIN_BROADCAST_CANCELLED)
+
+
+# The next message after tapping the broadcast menu button becomes the body.
+# Registered after the /cancel handler above so "/cancel" is not captured as
+# broadcast text; slash commands and non-text are rejected here.
+@router.message(Broadcast.compose, _is_admin)
+async def broadcast_compose(message: Message, state: FSMContext, db: Database) -> None:
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        await message.answer(texts.ADMIN_BROADCAST_COMPOSE_INVALID)
+        return
+    await _start_broadcast_preview(message, state, db, text)
 
 
 # ---------------------------------------------------------------------------

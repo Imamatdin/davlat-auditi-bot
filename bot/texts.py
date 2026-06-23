@@ -336,6 +336,13 @@ ADMIN_BROADCAST_USAGE = (
     "Foydalanish: <code>/broadcast xabar matni</code>\n"
     "Xabar barcha ro'yxatdan o'tgan foydalanuvchilarga yuboriladi."
 )
+ADMIN_BROADCAST_ASK = (
+    "Barcha ro'yxatdan o'tgan talabalarga yuboriladigan <b>xabar matnini</b> yuboring.\n"
+    "Bekor qilish uchun /cancel."
+)
+ADMIN_BROADCAST_COMPOSE_INVALID = (
+    "Iltimos, oddiy matn yuboring (buyruq emas). Bekor qilish uchun /cancel."
+)
 ADMIN_BROADCAST_PREVIEW = (
     "Bu xabar <b>{total}</b> ta talabaga yuboriladi. Tasdiqlaysizmi?\n\n"
     "<i>Ko'rinishi:</i>\n{preview}"
